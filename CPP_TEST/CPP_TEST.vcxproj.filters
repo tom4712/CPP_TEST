@@ -48,6 +48,12 @@
     <ClCompile Include="Command_Storage.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="Command_cookie.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="sqlite3.c">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TelegramApi.h">
@@ -66,6 +72,9 @@
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\kys\Downloads\json.hpp">
+      <Filter>소스 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="sqlite3.h">
       <Filter>소스 파일</Filter>
     </ClInclude>
   </ItemGroup>

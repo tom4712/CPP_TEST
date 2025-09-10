@@ -127,6 +127,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Commands.cpp" />
+    <ClCompile Include="Command_cookie.cpp" />
     <ClCompile Include="Command_Info.cpp" />
     <ClCompile Include="Command_Key.cpp" />
     <ClCompile Include="Command_Screen.cpp" />
@@ -135,6 +136,7 @@
     <ClCompile Include="Config.cpp" />
     <ClCompile Include="CPP_TEST.cpp" />
     <ClCompile Include="NetInfo.cpp" />
+    <ClCompile Include="sqlite3.c" />
     <ClCompile Include="SystemId.cpp" />
     <ClCompile Include="TelegramApi.cpp" />
   </ItemGroup>
@@ -143,6 +145,7 @@
     <ClInclude Include="Commands.h" />
     <ClInclude Include="Config.h" />
     <ClInclude Include="NetInfo.h" />
+    <ClInclude Include="sqlite3.h" />
     <ClInclude Include="SystemId.h" />
     <ClInclude Include="TelegramApi.h" />
   </ItemGroup>
