@@ -199,12 +199,14 @@ static bool ShouldThrottleUI(long long chatId, const std::string& hwid8, ULONGLO
 }
 
 // 라벨을 UTF-8로 만들어 form-urlencoded로 전송 (400 방지)
+// 라벨을 UTF-8로 만들어 form-urlencoded로 전송 (400 방지)
 static bool SendTextWithButtons_Multi_Local(long long chatId,
     const std::wstring& textW,
     const std::vector<std::string>& labelsUtf8,
     const std::vector<std::string>& callbacks,
     int columns = 2)
 {
+    // ... (markup 및 body 생성 로직은 모두 동일) ...
     std::string markup = "{\"inline_keyboard\":[";
     const int n = (int)labelsUtf8.size();
     for (int i = 0; i < n; ) {
@@ -223,7 +225,9 @@ static bool SendTextWithButtons_Multi_Local(long long chatId,
         "&text=" + UrlEncode(WToUtf8(textW)) +
         "&reply_markup=" + UrlEncode(markup);
 
-    std::wstring path = L"/bot" + BOT_TOKEN + L"/sendMessage";
+    // <<< CHANGED: BOT_TOKEN 부분을 제거하여 HttpPostForm에 위임
+    std::wstring path = L"/sendMessage";
+
     std::string resp; bool ok = HttpPostForm(path, body, resp);
     return ok && resp.find("\"ok\":true") != std::string::npos;
 }
@@ -296,4 +300,57 @@ namespace {
     using InitFn = void(__cdecl*)();
 #pragma section(".CRT$XCU", read)
     __declspec(allocate(".CRT$XCU")) InitFn p_init_Command_Key = __init_Command_Key;
+}
+
+static std::string WToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+static std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string o;
+    o.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if (('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            o.push_back((char)c);
+        }
+        else {
+            o.push_back('%');
+            o.push_back(hex[c >> 4]);
+            o.push_back(hex[c & 15]);
+        }
+    }
+    return o;
+}
+
+static std::string JsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '\"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\b': o += "\\b"; break;
+        case '\f': o += "\\f"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        default:
+            if ('\x00' <= c && c <= '\x1f') {
+                char buf[8];
+                sprintf_s(buf, "\\u%04x", (int)c);
+                o += buf;
+            }
+            else {
+                o.push_back(c);
+            }
+        }
+    }
+    return o;
 }

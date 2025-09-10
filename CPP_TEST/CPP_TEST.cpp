@@ -80,9 +80,15 @@ static bool IsForMe(const std::string& txt, const std::string& id8) {
 
 // getUpdates (롱폴링, limit=100으로 배치 수신)
 static bool GetUpdates(long long offset, std::string& out) {
-    std::wstring path = L"/bot" + BOT_TOKEN + L"/getUpdates";
+    // <<< CHANGED: BOT_TOKEN 부분을 제거하고 API 경로만 남깁니다.
+    std::wstring path = L"/getUpdates";
+
     std::string body = "timeout=25&limit=100&allowed_updates=%5B%22message%22,%22callback_query%22%5D";
-    if (offset > 0) body += "&offset=" + std::to_string(offset);
+    if (offset > 0) {
+        body += "&offset=" + std::to_string(offset);
+    }
+
+    // HttpPostForm이 내부적으로 토큰을 붙이고, 실패 시 재시도까지 모두 처리합니다.
     return HttpPostForm(path, body, out);
 }
 
@@ -165,7 +171,58 @@ static bool NextUpdate(const std::string& js, size_t& cur, Update& u) {
     cur = (a_next == std::string::npos) ? js.size() : a_next;
     return true;
 }
+static std::string WToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string out(len, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
 
+static std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string o;
+    o.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if (('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            o.push_back((char)c);
+        }
+        else {
+            o.push_back('%');
+            o.push_back(hex[c >> 4]);
+            o.push_back(hex[c & 15]);
+        }
+    }
+    return o;
+}
+
+static std::string JsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '\"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\b': o += "\\b"; break;
+        case '\f': o += "\\f"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        default:
+            if ('\x00' <= c && c <= '\x1f') {
+                char buf[8];
+                sprintf_s(buf, "\\u%04x", (int)c);
+                o += buf;
+            }
+            else {
+                o.push_back(c);
+            }
+        }
+    }
+    return o;
+}
 int main() {
     // 디스패치 키 = MachineGuid 8자리
     const std::wstring dispatchIdW = GetStableMachineId8();

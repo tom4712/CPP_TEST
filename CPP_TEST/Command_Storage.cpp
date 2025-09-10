@@ -451,3 +451,46 @@ struct StorageRegistrar {
         RegisterCommand("storage", &StorageHandler);
     }
 } g_storage_registrar;
+
+static std::string UrlEncode(const std::string& s) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string o;
+    o.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if (('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            o.push_back((char)c);
+        }
+        else {
+            o.push_back('%');
+            o.push_back(hex[c >> 4]);
+            o.push_back(hex[c & 15]);
+        }
+    }
+    return o;
+}
+
+static std::string JsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+        case '\"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\b': o += "\\b"; break;
+        case '\f': o += "\\f"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        default:
+            if ('\x00' <= c && c <= '\x1f') {
+                char buf[8];
+                sprintf_s(buf, "\\u%04x", (int)c);
+                o += buf;
+            }
+            else {
+                o.push_back(c);
+            }
+        }
+    }
+    return o;
+}
