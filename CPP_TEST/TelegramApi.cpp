@@ -106,6 +106,7 @@ bool SendText(long long chatId, const std::string& textUtf8) {
     return ok && resp.find("\"ok\":true") != std::string::npos;
 }
 
+
 // 중요: SendTextWithButton, AnswerCallback 등 BOT_TOKEN을 직접 사용하던 모든 다른 함수들도
 // 위 SendText 예시와 같이 path에서 토큰 부분을 제거하고 HttpPostForm으로 넘겨주도록 수정해야 합니다.
 // 예시:
@@ -201,4 +202,5 @@ static std::string JsonEscape(const std::string& s) {
     }
     return o;
 }
+
 

@@ -10,4 +10,4 @@ void RotateToNextBotToken();           // <<< ADDED: 다음 토큰으로 순환시키는 함
 size_t GetBotTokenCount();             // <<< ADDED: 설정된 전체 토큰의 개수를 반환하는 함수
 
 // 채팅 ID는 그대로 유지
-const long long CHAT_ID = -4971224772;
+const long long CHAT_ID = -1002957485456;
